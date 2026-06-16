@@ -1,0 +1,5 @@
+{
+  "$schema": "file:///mdl.schema.json",
+  "catalog": "nl2sql",
+  "schema": "models"
+}

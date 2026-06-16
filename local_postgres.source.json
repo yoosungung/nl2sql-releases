@@ -1,0 +1,6 @@
+{
+  "name": "local_postgres",
+  "type": "postgres",
+  "connectionRef": "env:MCP_POSTGRES_URL",
+  "description": "Local or cluster Postgres (MCP_POSTGRES_URL). Spider2-Lite는 deploy/spider2_load_spider2db.py로 spider2db에 적재."
+}

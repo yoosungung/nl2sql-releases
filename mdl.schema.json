@@ -1,0 +1,422 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nl2sql.local/schemas/mdl.schema.json",
+  "title": "NL2SQL MDL Manifest Schema",
+  "description": "Semantic-layer manifest.",
+
+  "$defs": {
+    "dataType": {
+      "description": "Type vocabulary. Each entry maps 1:1 to an Apache Arrow DataType used by DataFusion; the dialect unparser is responsible for printing per-warehouse SQL. Composite/array types are intentionally absent until needed.",
+      "type": "string",
+      "pattern": "^(boolean|tinyint|smallint|int|bigint|float|double|decimal\\(\\s*\\d+\\s*,\\s*\\d+\\s*\\)|text|varchar|date|time|timestamp|timestamptz|interval|bytes|json|uuid)$"
+    },
+
+    "innerColumnRef": {
+      "description": "Reference to a column on one of the model's inner tables. Form 'alias.column' where alias is one of models[].tables[].alias and column is a column produced by that inner table.",
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*\\.[^.\\s]+$"
+    },
+
+    "tableReference": {
+      "description": "Physical address of an inner table inside the owning source.",
+      "type": "object",
+      "required": ["table"],
+      "additionalProperties": false,
+      "properties": {
+        "database": { "type": "string" },
+        "schema":   { "type": "string" },
+        "table":    { "type": "string", "minLength": 1 }
+      }
+    },
+
+    "innerTableJoin": {
+      "description": "How this inner table joins onto another inner table in the same model. Absent only on the model's single master table (the join root).",
+      "type": "object",
+      "required": ["to", "type", "on"],
+      "additionalProperties": false,
+      "properties": {
+        "to": {
+          "description": "alias of another inner table in this model. Must not be self.",
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "description": "Join kind. v0 supports inner and left only — right joins are expressed as a left join with the operands swapped.",
+          "type": "string",
+          "enum": ["inner", "left"]
+        },
+        "on": {
+          "description": "Equality conditions; multi-column joins use multiple entries (all ANDed). 'left' names a column on this inner table; 'right' names a column on the table referenced by 'to'.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["left", "right"],
+            "additionalProperties": false,
+            "properties": {
+              "left":  { "type": "string", "minLength": 1 },
+              "right": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+
+    "innerTable": {
+      "description": "One physical input to a model. Either a tableReference (a real warehouse table) or a refSql (a warehouse-native SQL snippet inlined as a CTE during unparse). The set of inner tables forms a join graph rooted at the single master entry (the one without 'join').",
+      "type": "object",
+      "required": ["alias", "priority"],
+      "additionalProperties": false,
+      "properties": {
+        "alias": {
+          "description": "Identifier used inside this model (column.from and join.to reference it). Unique within models[].tables[]. Not exposed outside the model.",
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        },
+        "priority": {
+          "description": "Lower number = higher precedence. Used as a console-side hint when authoring columns whose name appears on multiple inner tables; the actual SQL output is decided strictly by column.from (no implicit COALESCE).",
+          "type": "integer",
+          "minimum": 1
+        },
+        "tableReference": { "$ref": "#/$defs/tableReference" },
+        "refSql": {
+          "description": "Warehouse-native SQL that defines this inner table when semantic SQL can't express it (e.g. dialect-specific functions like BigQuery QUALIFY, ML.PREDICT). Inlined as a CTE-equivalent during unparse to the owning source's dialect; DataFusion treats it opaquely. Mutually exclusive with tableReference. The columns it produces must match what is referenced by column.from — mcp does not introspect the statement.",
+          "type": "string",
+          "minLength": 1
+        },
+        "join":        { "$ref": "#/$defs/innerTableJoin" },
+        "description": { "type": "string" }
+      },
+      "oneOf": [
+        { "required": ["tableReference"], "not": { "required": ["refSql"] } },
+        { "required": ["refSql"], "not": { "required": ["tableReference"] } }
+      ]
+    },
+
+    "columnPhysical": {
+      "type": "object",
+      "required": ["name", "kind", "type", "from"],
+      "additionalProperties": false,
+      "properties": {
+        "name":        { "type": "string", "minLength": 1 },
+        "kind":        { "const": "physical" },
+        "type":        { "$ref": "#/$defs/dataType" },
+        "from": {
+          "description": "Source of this column inside the model's inner tables. A single 'alias.col' maps 1:1. An array of 'alias.col' entries is emitted as COALESCE(...) in the given order — explicit, not derived from inner-table priority. Each alias must exist in models[].tables[].alias.",
+          "oneOf": [
+            { "$ref": "#/$defs/innerColumnRef" },
+            {
+              "type": "array",
+              "minItems": 2,
+              "items": { "$ref": "#/$defs/innerColumnRef" }
+            }
+          ]
+        },
+        "description": { "type": "string" },
+        "notNull":     { "type": "boolean" },
+        "isHidden":    { "type": "boolean" }
+      }
+    },
+
+    "columnCalculated": {
+      "type": "object",
+      "required": ["name", "kind", "type", "expression"],
+      "additionalProperties": false,
+      "properties": {
+        "name":        { "type": "string", "minLength": 1 },
+        "kind":        { "const": "calculated" },
+        "type":        { "$ref": "#/$defs/dataType" },
+        "expression": {
+          "description": "Semantic-SQL scalar expression. May reference sibling columns and dotted-path relations (e.g. customer.country).",
+          "type": "string",
+          "minLength": 1
+        },
+        "description": { "type": "string" },
+        "isHidden":    { "type": "boolean" }
+      }
+    },
+
+    "columnRelation": {
+      "type": "object",
+      "required": ["name", "kind", "to", "via"],
+      "additionalProperties": false,
+      "properties": {
+        "name":        { "type": "string", "minLength": 1 },
+        "kind":        { "const": "relation" },
+        "to": {
+          "description": "Target model name (must exist in models[].name).",
+          "type": "string",
+          "minLength": 1
+        },
+        "via": {
+          "description": "Relationship name (must exist in relationships[].name) connecting this model to 'to'.",
+          "type": "string",
+          "minLength": 1
+        },
+        "description": { "type": "string" },
+        "isHidden":    { "type": "boolean" }
+      }
+    },
+
+    "column": {
+      "oneOf": [
+        { "$ref": "#/$defs/columnPhysical" },
+        { "$ref": "#/$defs/columnCalculated" },
+        { "$ref": "#/$defs/columnRelation" }
+      ]
+    }
+  },
+
+  "type": "object",
+  "required": ["$schema", "catalog", "schema", "sources", "models"],
+  "additionalProperties": false,
+  "properties": {
+
+    "$schema": {
+      "description": "Schema URI (this file).",
+      "type": "string"
+    },
+
+    "catalog": {
+      "description": "Default catalog name surfaced to semantic SQL (e.g. 'nl2sql'). Used as DataFusion SessionContext default catalog.",
+      "type": "string",
+      "minLength": 1
+    },
+
+    "schema": {
+      "description": "Default schema name surfaced to semantic SQL (e.g. 'models').",
+      "type": "string",
+      "minLength": 1
+    },
+
+    "sources": {
+      "description": "Warehouse sources. v0 routes each query to exactly one source; cross-source JOIN is rejected (cross_source_join error). See mcp/DESIGN.md §4.5.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "type", "connectionRef"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "description": "Globally unique source name.",
+            "type": "string",
+            "minLength": 1
+          },
+          "type": {
+            "description": "Warehouse driver type. Phase 0 picks one target first; others light up as drivers land.",
+            "type": "string",
+            "enum": ["postgres", "duckdb", "mysql", "bigquery", "snowflake", "clickhouse", "mssql", "trino"]
+          },
+          "connectionRef": {
+            "description": "Indirect credential reference. Format 'secret:<name>' (k8s Secret) or 'env:<NAME>' (env var). Plaintext credentials in metadata are forbidden (ARCHITECTURE.md §1.2).",
+            "type": "string",
+            "pattern": "^(secret|env):[A-Za-z0-9_./-]+$"
+          },
+          "readOnlyRole": {
+            "description": "Optional warehouse role/user override. The infra contract requires this be read-only regardless.",
+            "type": "string"
+          },
+          "defaultDatabase": { "type": "string" },
+          "defaultSchema":   { "type": "string" },
+          "description":     { "type": "string" },
+          "federates": {
+            "description": "Optional federation declaration. If set, this source can route queries that span the listed sources (e.g. Trino in front of Postgres + BigQuery). v0 mcp ignores this field and rejects cross-source queries; Phase 3+ enables route_source fallback through a federation source. Object form (not bare strings) reserves room for dialect-specific mappings (remoteCatalog, etc.) to be added later without a schema migration.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["source"],
+              "additionalProperties": false,
+              "properties": {
+                "source": {
+                  "description": "Underlying source name. Must match one of sources[].name.",
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "functions": {
+            "description": "MDL-declared functions on top of mcp's code-side baseline (Phase 3.9). Each entry stands in as a signature-only UDF so semantic SQL referencing the function passes DataFusion's planner; the routed-source whitelist (mcp's enforce_function_whitelist) then decides accept/reject. v0 stores the declarations; UDF registration + per-source enforcement activate when the first MDL declares one.",
+            "type": "array",
+            "default": [],
+            "items": {
+              "type": "object",
+              "required": ["name", "kind", "returns"],
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "description": "Function name as it appears in semantic SQL.",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "kind": {
+                  "description": "DataFusion UDF family the registration will use.",
+                  "type": "string",
+                  "enum": ["scalar", "aggregate", "window"]
+                },
+                "returns": {
+                  "description": "Declared return type (from the dataType vocabulary).",
+                  "$ref": "#/$defs/dataType"
+                },
+                "description": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "models": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "source", "tables", "columns"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "description": "Globally unique model name. Referenced in semantic SQL as <catalog>.<schema>.<name> or short <name>.",
+            "type": "string",
+            "minLength": 1
+          },
+          "source": {
+            "description": "Owning source. Must match one of sources[].name. A query touching models from multiple sources is rejected in v0; see federation note on sources[].federates.",
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "description": "Human description, used by search_tables ranking and shown in the console.",
+            "type": "string"
+          },
+          "tables": {
+            "description": "Inner tables that compose the model. Exactly one entry must omit 'join' — that entry is the master (join root); all others must declare 'join.to' pointing at another alias in this same array. The join graph must be acyclic and connected. Cross-table references in 'join.on' and in column.from use aliases declared here.",
+            "type": "array",
+            "minItems": 1,
+            "items": { "$ref": "#/$defs/innerTable" }
+          },
+          "columns": {
+            "description": "Externally visible columns. Names are the model's contract; physical kind columns are bound to inner tables via 'from'. Calculated and relation columns reference other externally visible column names — never inner aliases.",
+            "type": "array",
+            "minItems": 1,
+            "items": { "$ref": "#/$defs/column" }
+          },
+          "primaryKey": {
+            "description": "Physical column name(s) forming the model PK, in key order. A single column may be a string; composite keys use a non-empty string array. Required when another model targets this one via a relation.",
+            "oneOf": [
+              { "type": "string", "minLength": 1 },
+              {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": { "type": "string", "minLength": 1 }
+              }
+            ]
+          }
+        }
+      }
+    },
+
+    "relationships": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "joinType", "from", "to"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "description": "Globally unique relationship name. Referenced by column kind='relation' via this name.",
+            "type": "string",
+            "minLength": 1
+          },
+          "joinType": {
+            "description": "Cardinality from 'from' to 'to'. many_to_many is intentionally absent in v0 (model an explicit junction model instead).",
+            "type": "string",
+            "enum": ["one_to_one", "one_to_many", "many_to_one"]
+          },
+          "from": {
+            "type": "object",
+            "required": ["model", "column"],
+            "additionalProperties": false,
+            "properties": {
+              "model":  { "type": "string", "minLength": 1 },
+              "column": { "type": "string", "minLength": 1 }
+            }
+          },
+          "to": {
+            "type": "object",
+            "required": ["model", "column"],
+            "additionalProperties": false,
+            "properties": {
+              "model":  { "type": "string", "minLength": 1 },
+              "column": { "type": "string", "minLength": 1 }
+            }
+          },
+          "description": { "type": "string" }
+        }
+      }
+    },
+
+    "views": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "statement"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "description": "Globally unique view name. Usable in semantic SQL as a relation alongside models.",
+            "type": "string",
+            "minLength": 1
+          },
+          "statement": {
+            "description": "Semantic SQL statement. Inlined by the analyzer when the view is referenced.",
+            "type": "string",
+            "minLength": 1
+          },
+          "description": { "type": "string" }
+        }
+      }
+    },
+
+    "policies": {
+      "description": "Row-filter / column-mask access-control bindings (Phase 3.8). Multiple matching policies for the same (caller, model) are AND-merged: row filters conjuncted, masked-column sets unioned.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "model"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "description": "Globally unique policy name.",
+            "type": "string",
+            "minLength": 1
+          },
+          "model": {
+            "description": "models[].name this policy attaches to.",
+            "type": "string",
+            "minLength": 1
+          },
+          "principals": {
+            "description": "Match strings against the calling identity. Empty list means 'applies to anyone with identity'. 'alice@example.com' matches the caller email; 'group:foo' matches a caller group named foo.",
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "default": []
+          },
+          "rowFilter": {
+            "description": "SQL boolean expression evaluated against the bound model's non-relation columns. ANDed with the user query's WHERE clause.",
+            "type": "string",
+            "minLength": 1
+          },
+          "maskedColumns": {
+            "description": "Names of non-relation columns on the bound model whose values must be replaced with NULL in the projection.",
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "default": []
+          },
+          "description": { "type": "string" }
+        }
+      }
+    }
+  }
+}
