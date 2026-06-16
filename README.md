@@ -1,124 +1,175 @@
-# nl2sql
+# nl2sql — 설치·사용 가이드
 
-자연어 질문을 의미 계층(MDL) 기반 SQL로 변환해 워크하우스에서 실행하고 결과를 시각화하는 시스템. 세 컴포넌트:
+자연어로 데이터에 질문하면, 시스템이 메타데이터(테이블·조인 정의)를 바탕으로 SQL을 만들고 데이터베이스에서 실행한 뒤 표·차트로 보여 줍니다.
 
-- [`frontend/`](frontend/) — Vite + React SPA (채팅 UI + 메타데이터 콘솔)
-- [`backend/`](backend/) — FastAPI + deepagents. canonical metadata git repo 보유, agent 실행, MCP 호출.
-- [`mcp/`](mcp/) — Rust + DataFusion. semantic SQL → warehouse SQL 재작성기.
-
-문서 안내:
-
-- 시스템 규칙·계약 + 컴포넌트 간 인터페이스 형태: [ARCHITECTURE.md](ARCHITECTURE.md) (§1 계약 / §2 이후 형태)
-- 수행 계획: [ROADMAP.md](ROADMAP.md)
-- 컴포넌트 내부 설계: [backend/DESIGN.md](backend/DESIGN.md)(공통), [backend/src/nl2sql_backend/DESIGN.md](backend/src/nl2sql_backend/DESIGN.md), [frontend/DESIGN.md](frontend/DESIGN.md), [mcp/DESIGN.md](mcp/DESIGN.md)
-- k8s 사전 의존성 + dev→운영 컷오버: [deploy/dependencies.md](deploy/dependencies.md)
-- k8s 설치·Secret·PVC: [deploy/SETUP.md](deploy/SETUP.md), 매니페스트 베이스 [deploy/k8s/base/](deploy/k8s/base/)
-- PR/push CI: [.github/workflows/ci.yml](.github/workflows/ci.yml)
-- 공개 README·바이너리 릴리스: [yoosungung/nl2sql-releases](https://github.com/yoosungung/nl2sql-releases) (private `nl2sql`에서 Actions로 미러)
-
-운영 통합 이미지 빌드는 [backend/DESIGN.md ## Commands](backend/DESIGN.md#commands)·[mcp/DESIGN.md Commands](mcp/DESIGN.md#commands)를 본다.
+바이너리는 이 저장소의 [Releases](https://github.com/yoosungung/nl2sql-releases/releases)에서 받습니다.
 
 ---
 
-## Quickstart — Phase 1 로컬 데모
+## 무엇을 받을 수 있나
 
-세 컴포넌트(`mcp`, `backend`, `frontend`) + DuckDB 한 파일로 돌아간다. 외부 클러스터 없이 한 노트북에서 시연 가능한 최소 셋업.
+| 항목 | 이 Releases |
+|------|-------------|
+| **mcp** (`nl2sql-mcp-linux-amd64`) | 포함 — Linux x86_64용 실행 파일 |
+| **backend + 웹 UI** | 포함하지 않음 — 운영팀이 제공하는 이미지·패키지 사용 |
+| **메타데이터 정의** | 포함하지 않음 — 조직에서 별도 git 저장소로 관리 |
 
-### 사전 조건
+nl2sql을 쓰려면 **mcp**, **backend(UI 포함)**, **메타데이터 저장소**, **PostgreSQL(또는 지원 DB)**, **LLM API**가 모두 필요합니다. 이 페이지는 그중 **mcp 설치·연동**을 다룹니다.
 
-| 도구 | 버전 |
-|---|---|
-| Rust toolchain | stable (mcp 빌드용) |
-| Python | 3.11+ (backend) |
-| `uv` | 0.9+ (Python pkg/venv) |
-| Node | 20+ |
-| npm | 10+ |
-| DuckDB CLI | 1.1+ (DuckDB 데모용, 선택) |
+---
 
-LLM API 키 (`ANTHROPIC_API_KEY`) 1개 — `agent.builder.build_agent`가 이걸 보고 모델 핸들을 만든다. 미설정이면 `/chat`이 503을 반환한다.
+## 구성 요소
 
-### 1. metadata 샘플 repo 초기화
+| 구성 요소 | 역할 |
+|-----------|------|
+| **웹 UI** | 채팅(질의·결과·차트) + 메타데이터 편집 화면 |
+| **backend** | API·채팅 에이전트·메타데이터 관리 |
+| **mcp** | 질의용 SQL 생성·실행 |
+| **메타데이터** | 어떤 테이블·조인을 쓸지 정의한 JSON 파일 모음 |
+| **웨어하우스** | 실제 데이터가 있는 DB (예: PostgreSQL) |
+| **LLM** | 채팅 에이전트용 API |
 
-[`deploy/sample-metadata/`](deploy/sample-metadata/)는 손작성 MDL 매니페스트(customers / products / orders 3 모델). backend가 canonical working tree로 쓰려면 **그 폴더 안에서 git init**해야 한다 — backend는 경로를 그대로 받아 `pygit2.Repository`로 열기 때문이다.
+---
 
-```bash
-cp -R deploy/sample-metadata /tmp/nl2sql-metadata
-cd /tmp/nl2sql-metadata
-git init -q && git add -A
-git -c user.email="demo@local" -c user.name="demo" commit -q -m "seed"
-```
+## 사전 준비
 
-`/tmp/nl2sql-metadata`는 예시 — 임의 경로로 바꿔도 된다. 아래 env에서 같은 경로를 가리키면 된다.
+운영팀 또는 설치 가이드에서 아래를 먼저 준비합니다.
 
-### 2. 웨어하우스
+| 항목 | 설명 |
+|------|------|
+| Linux x86_64 서버 | mcp 바이너리 실행 환경 |
+| PostgreSQL | 질의 대상 DB 접속 정보 |
+| 메타데이터 저장소 | 모델·관계 정의가 들어 있는 디렉터리(또는 git clone) |
+| backend + UI | 배포된 서비스 URL·이미지 |
+| LLM API | Anthropic 또는 OpenAI 호환 API |
 
-**Postgres만 (권장, Spider2·클러스터):** 루트 `.env`에 `MCP_POSTGRES_URL`·`MCP_POSTGRES_SOURCE_NAME=local_postgres`를 두고 mcp를 띄운다. `MCP_DUCKDB_PATH`는 설정하지 않는다. Spider2-Lite 자산·PG 적재·Opik 평가: [spider2-eval/DESIGN.md](spider2-eval/DESIGN.md) (`uv run spider2-load-pg` 등).
+메타데이터 디렉터리는 비어 있으면 mcp·backend가 시작되지 않습니다.
 
-metadata의 source 이름은 `local_postgres`와 일치해야 한다([deploy/sample-metadata/](deploy/sample-metadata/)).
+---
 
-### 3. 환경 변수
+## 1. mcp 바이너리 설치
 
-| 변수 | 컴포넌트 | 값 (예시) |
-|---|---|---|
-| `MCP_BIND_ADDR` | mcp | `127.0.0.1:8800` |
-| `MCP_METADATA_REPO` | mcp | `/tmp/nl2sql-metadata` (로컬 clone 경로; Phase 4에선 mcp 전용 PVC) |
-| `MCP_METADATA_GIT_REMOTE` | mcp | (선택) GitLab mirror HTTPS URL. unset이면 로컬 quickstart처럼 기존 working tree만 연다 |
-| `MCP_GIT_PULL_TOKEN` | mcp | (선택) read-only HTTP(S) token — unset이면 공개 또는 자격증명 미사용 원격만 |
-| `MCP_POSTGRES_URL` | mcp | (Postgres만) libpq URL |
-| `MCP_POSTGRES_SOURCE_NAME` | mcp | `local_postgres` (기본값) |
-| `MCP_SHARED_TOKEN` | mcp, backend | 임의의 16+ 바이트 문자열 |
-| `MCP_URL` | backend | `http://127.0.0.1:8800/mcp` |
-| `METADATA_REPO_PATH` | backend | `/tmp/nl2sql-metadata` |
-| `METADATA_SCHEMA_PATH` | backend | repo-root `schemas/mdl.schema.json` 절대경로 (정본). 이미지에선 `/app/schemas/mdl.schema.json` 기본 set |
-| `CONVERSATION_DB_URL` | backend | SQLAlchemy URL. 기본 `sqlite+aiosqlite:///./conversations.db`. Phase 4 운영은 postgres로 교체 |
-| `NL2SQL_DEV_USER` | backend | `demo@local` (OIDC 우회 dev 모드) |
-| `ANTHROPIC_API_KEY` | backend | provider API 키 |
-
-### 4. 부팅
-
-세 터미널에서:
+[Releases](https://github.com/yoosungung/nl2sql-releases/releases)에서 최신 `nl2sql-mcp-linux-amd64`를 받습니다.
 
 ```bash
-# 터미널 1 — mcp
-cd mcp
-MCP_BIND_ADDR=127.0.0.1:8800 \
-MCP_METADATA_REPO=/tmp/nl2sql-metadata \
-MCP_POSTGRES_URL=postgresql://... \
-MCP_SHARED_TOKEN=dev-shared-token-please-change \
-cargo run --release
+# 버전은 Releases 페이지의 태그로 바꿉니다 (예: v0.1.0)
+VERSION=v0.1.0
+curl -LO "https://github.com/yoosungung/nl2sql-releases/releases/download/${VERSION}/nl2sql-mcp-linux-amd64"
+chmod +x nl2sql-mcp-linux-amd64
+sudo mv nl2sql-mcp-linux-amd64 /usr/local/bin/nl2sql-mcp
 ```
+
+---
+
+## 2. 환경 변수
+
+backend와 **같은 값**으로 맞춰야 하는 항목이 있습니다. Kubernetes 등에서는 Secret·ConfigMap에 동일한 키 이름으로 넣으면 됩니다.
+
+### mcp
+
+| 변수 | 필수 | 설명 |
+|------|------|------|
+| `MCP_SHARED_TOKEN` | 예 | backend와 **동일한** 인증 토큰 |
+| `MCP_METADATA_REPO` | 예 | 메타데이터 디렉터리 경로 |
+| `MCP_POSTGRES_URL` | DB 사용 시 | `postgresql://user:pass@host:5432/dbname` |
+| `MCP_POSTGRES_SOURCE_NAME` | | 메타데이터에 적힌 source 이름과 동일 (예: `local_postgres`) |
+| `MCP_BIND_ADDR` | | 기본 `127.0.0.1:8800`. 다른 서버에서 접속하면 `0.0.0.0:8800` 등 |
+| `MCP_METADATA_GIT_REMOTE` | 선택 | 메타데이터를 원격 git에서 받을 때 URL |
+| `MCP_GIT_PULL_TOKEN` | 선택 | private git용 읽기 전용 토큰 |
+
+### backend (mcp와 연동할 때)
+
+| 변수 | 필수 | 설명 |
+|------|------|------|
+| `MCP_URL` | 예 | `http://<mcp-호스트>:8800/mcp` |
+| `MCP_SHARED_TOKEN` | 예 | mcp와 동일 |
+| `METADATA_REPO_PATH` | 예 | mcp의 `MCP_METADATA_REPO`와 같은 내용 |
+| `ANTHROPIC_API_KEY` | LLM | Anthropic 사용 시 |
+| `OPENAI_API_BASE` | LLM | OpenAI 호환 API 주소 |
+| `OPENAI_API_KEY` | LLM | API 키 |
+| `NL2SQL_MODEL` | | 사용할 모델 이름 (예: `openai:model-name`) |
+| `CONVERSATION_DB_URL` | | 대화 기록 DB (미설정 시 SQLite 파일) |
+
+LLM 변수는 **둘 중 하나 방식**만 쓰면 됩니다(Anthropic 또는 OpenAI 호환).
+
+---
+
+## 3. 기동·확인
+
+### mcp 실행
 
 ```bash
-# 터미널 2 — backend
-cd backend
-MCP_URL=http://127.0.0.1:8800/mcp \
-MCP_SHARED_TOKEN=dev-shared-token-please-change \
-METADATA_REPO_PATH=/tmp/nl2sql-metadata \
-NL2SQL_DEV_USER=demo@local \
-ANTHROPIC_API_KEY=sk-... \
-uv run python -m nl2sql_backend
+export MCP_BIND_ADDR=0.0.0.0:8800
+export MCP_METADATA_REPO=/var/lib/nl2sql/metadata
+export MCP_POSTGRES_URL='postgresql://user:pass@host:5432/warehouse'
+export MCP_POSTGRES_SOURCE_NAME=local_postgres
+export MCP_SHARED_TOKEN='your-shared-secret'
+
+nl2sql-mcp
 ```
+
+정상 여부:
 
 ```bash
-# 터미널 3 — frontend
-cd frontend
-npm install   # 첫 회만
-npm run dev
+curl -s http://127.0.0.1:8800/health
+# ok
 ```
 
-브라우저: <http://localhost:5173>. vite는 `/api/*`만 backend(8080)로 프록시한다([frontend/vite.config.ts](frontend/vite.config.ts)). 정적 자산은 vite dev server가 직접 서빙 — HMR 유지.
+### backend·UI
 
-### 테스트
+backend는 운영 환경에 맞게 이미 배포되어 있어야 합니다. 위 mcp 주소·공유 토큰·메타데이터 경로·LLM 설정이 backend 쪽과 일치하는지 확인합니다.
 
 ```bash
-cd backend
-uv run pytest tests/test_mdl_compose.py tests/test_mdl_lifecycle.py -v
+curl -s http://<backend-호스트>:8080/api/ready
 ```
 
-### 데모 질문 예시
+브라우저에서는 **backend가 제공하는 URL**로 접속합니다(UI는 backend에 포함된 경우가 많습니다).
 
+---
+
+## 4. 사용 방법
+
+1. 브라우저에서 채팅 화면을 엽니다.
+2. 자연어로 질문합니다. 예:
+   - `지난달 주문 합계가 가장 큰 고객 3명은?`
+   - `국가별 주문 합계`
+3. 결과가 표·차트로 표시됩니다.
+4. 권한이 있으면 **메타데이터 콘솔**에서 테이블·조인 정의를 수정할 수 있습니다.
+
+메타데이터를 바꾼 뒤에는 backend가 저장·동기화하고, 이후 질의는 갱신된 정의를 사용합니다.
+
+---
+
+## 5. 문제 해결
+
+| 증상 | 확인할 것 |
+|------|-----------|
+| 채팅이 안 됨(503) | LLM API 키·모델 설정 |
+| mcp 연결 거부(401) | `MCP_SHARED_TOKEN`이 backend와 같은지 |
+| SQL 실행 실패 | DB 접속 URL, 메타데이터 source 이름, 테이블 정의 |
+| mcp가 안 뜸 | 메타데이터 경로, `MCP_SHARED_TOKEN` 설정 |
+| 메타데이터 오류 | 메타데이터 디렉터리에 유효한 정의 파일이 있는지 |
+
+mcp 응답 확인(토큰 필요):
+
+```bash
+curl -s -H "Authorization: Bearer $MCP_SHARED_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+  http://127.0.0.1:8800/mcp
 ```
-지난달 주문 합계가 가장 큰 고객 3명은?
-국가별 주문 합계
-electronics 카테고리 상품 목록
-```
+
+---
+
+## 6. 업그레이드
+
+1. [Releases](https://github.com/yoosungung/nl2sql-releases/releases)에서 새 `nl2sql-mcp-linux-amd64`를 받아 교체합니다.
+2. mcp 프로세스(또는 컨테이너)를 재시작합니다.
+3. backend·UI 버전은 운영팀 안내에 따릅니다.
+4. 릴리스 노트에 breaking change가 있으면 메타데이터 호환 여부를 확인합니다.
+
+---
+
+## 문의
+
+backend·UI·메타데이터·인프라는 조직별로 배포 방식이 다릅니다. 이 Releases에는 **mcp 바이너리**만 올라옵니다. 그 외는 담당 운영팀에 문의하세요.
