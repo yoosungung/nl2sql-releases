@@ -12,7 +12,7 @@
 |------|-----------|
 | **mcp** `nl2sql-mcp-linux-amd64` | [Releases](https://github.com/yoosungung/nl2sql-releases/releases) asset |
 | **mcp** `nl2sql-mcp-macos-arm64` | [Releases](https://github.com/yoosungung/nl2sql-releases/releases) asset (Apple Silicon Mac) |
-| **backend + 웹 UI** | `ghcr.io/yoosungung/nl2sql-backend:<태그>` |
+| **backend + 웹 UI** | `ghcr.io/yoosungung/nl2sql-backend:<태그>` (linux/amd64·linux/arm64) |
 | **메타데이터 정의** | 포함하지 않음 — 조직에서 별도 git 저장소로 관리 |
 
 nl2sql을 쓰려면 **mcp**, **backend(UI 포함)**, **메타데이터 저장소**, **PostgreSQL(또는 지원 DB)**, **LLM API**가 모두 필요합니다.
@@ -74,15 +74,11 @@ sudo mv nl2sql-mcp-macos-arm64 /usr/local/bin/nl2sql-mcp
 
 frontend가 빌드되어 `/app/static`으로 포함된 **통합 이미지**입니다. 별도 frontend 서버는 필요 없습니다.
 
+멀티 아키텍처 manifest입니다 — Linux x86_64 서버(`linux/amd64`)와 Apple Silicon Mac Docker(`linux/arm64`) 모두 `docker pull`만 하면 됩니다.
+
 ```bash
-VERSION=v0.1.0
+VERSION=v0.1.1   # Releases 태그로 변경
 docker pull ghcr.io/yoosungung/nl2sql-backend:${VERSION}
-```
-
-GHCR 패키지가 private이면 먼저 로그인합니다 (`read:packages` 권한 PAT):
-
-```bash
-echo "$GITHUB_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USER --password-stdin
 ```
 
 실행 예 (메타데이터·env는 환경에 맞게 volume·변수 추가):
@@ -179,7 +175,7 @@ curl -s http://127.0.0.1:8080/api/ready
 | mcp 연결 거부(401) | `MCP_SHARED_TOKEN`이 backend와 같은지 |
 | SQL 실행 실패 | DB URL, 메타데이터 source 이름, 테이블 정의 |
 | UI가 안 보임 | backend 이미지가 정상 기동했는지, 포트 8080 |
-| `docker pull` 실패 | GHCR 로그인·패키지 공개 여부 |
+| `docker pull` 실패 | 네트워크·태그 오타 (public GHCR이면 로그인 불필요) |
 
 ---
 
