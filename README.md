@@ -2,7 +2,7 @@
 
 자연어로 데이터에 질문하면, 시스템이 메타데이터(테이블·조인 정의)를 바탕으로 SQL을 만들고 데이터베이스에서 실행한 뒤 표·차트로 보여 줍니다.
 
-배포물은 [Releases](https://github.com/yoosungung/nl2sql-releases/releases)(mcp 바이너리)와 [GHCR](https://github.com/yoosungung/nl2sql/pkgs/container/nl2sql-backend)(backend+UI Docker 이미지)에서 받습니다. **같은 릴리스 태그**를 쓰면 됩니다.
+배포물은 [Releases](https://github.com/yoosungung/nl2sql-releases/releases)(mcp 바이너리)와 [GHCR](https://github.com/yoosungung/nl2sql/pkgs)(mcp·backend Docker 이미지)에서 받습니다. **같은 릴리스 태그**를 쓰면 됩니다.
 
 ---
 
@@ -12,6 +12,7 @@
 |------|-----------|
 | **mcp** `nl2sql-mcp-linux-amd64` | [Releases](https://github.com/yoosungung/nl2sql-releases/releases) asset |
 | **mcp** `nl2sql-mcp-macos-arm64` | [Releases](https://github.com/yoosungung/nl2sql-releases/releases) asset (Apple Silicon Mac) |
+| **mcp** (Docker) | `ghcr.io/yoosungung/nl2sql-mcp:<태그>` (linux/amd64) |
 | **backend + 웹 UI** | `ghcr.io/yoosungung/nl2sql-backend:<태그>` (linux/amd64·linux/arm64) |
 | **메타데이터 정의** | 포함하지 않음 — 조직에서 별도 git 저장소로 관리 |
 
@@ -37,7 +38,7 @@ nl2sql을 쓰려면 **mcp**, **backend(UI 포함)**, **메타데이터 저장소
 | 항목 | 설명 |
 |------|------|
 | mcp 실행 환경 | Linux x86_64 서버, 또는 Apple Silicon Mac |
-| Docker | backend+UI 이미지 실행용 |
+| Docker | mcp·backend 이미지 실행용 (Linux 서버·k8s) |
 | PostgreSQL | 질의 대상 DB 접속 정보 |
 | 메타데이터 저장소 | 모델·관계 정의 디렉터리(또는 git clone) |
 | LLM API | Anthropic 또는 OpenAI 호환 API |
@@ -66,6 +67,24 @@ VERSION=v0.1.0
 curl -LO "https://github.com/yoosungung/nl2sql-releases/releases/download/${VERSION}/nl2sql-mcp-macos-arm64"
 chmod +x nl2sql-mcp-macos-arm64
 sudo mv nl2sql-mcp-macos-arm64 /usr/local/bin/nl2sql-mcp
+```
+
+### Linux (Docker, x86_64)
+
+바이너리 대신 컨테이너로 실행할 때 (k8s·서버 공통):
+
+```bash
+VERSION=v0.1.0   # Releases 태그로 변경
+docker pull ghcr.io/yoosungung/nl2sql-mcp:${VERSION}
+```
+
+```bash
+docker run --rm -p 8800:8800 \
+  -e MCP_SHARED_TOKEN=your-shared-secret \
+  -e MCP_METADATA_REPO=/var/lib/nl2sql/metadata \
+  -e MCP_POSTGRES_URL=postgresql://user:pass@host:5432/dbname \
+  -v /path/to/metadata:/var/lib/nl2sql/metadata \
+  ghcr.io/yoosungung/nl2sql-mcp:${VERSION}
 ```
 
 ---
@@ -181,10 +200,9 @@ curl -s http://127.0.0.1:8080/api/ready
 
 ## 7. 업그레이드
 
-1. [Releases](https://github.com/yoosungung/nl2sql-releases/releases)에서 mcp 바이너리를 새 태그로 교체합니다.
+1. [Releases](https://github.com/yoosungung/nl2sql-releases/releases)에서 mcp 바이너리를 새 태그로 교체하거나, `docker pull ghcr.io/yoosungung/nl2sql-mcp:<새-태그>` 후 mcp 컨테이너를 재시작합니다.
 2. `docker pull ghcr.io/yoosungung/nl2sql-backend:<새-태그>` 후 backend 컨테이너를 재시작합니다.
-3. mcp 프로세스도 재시작합니다.
-4. 릴리스 노트에 breaking change가 있으면 메타데이터 호환 여부를 확인합니다.
+3. 릴리스 노트에 breaking change가 있으면 메타데이터 호환 여부를 확인합니다.
 
 ---
 
