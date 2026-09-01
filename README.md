@@ -11,7 +11,7 @@
 | 항목 | 배포 위치 |
 |------|-----------|
 | **mcp** `nl2sql-mcp-linux-amd64` | [Releases](https://github.com/yoosungung/nl2sql-releases/releases) asset |
-| **mcp** `nl2sql-mcp-macos-arm64` | [Releases](https://github.com/yoosungung/nl2sql-releases/releases) asset (Apple Silicon Mac) |
+| **mcp** `nl2sql-mcp-macos-arm64` | [Releases](https://github.com/yoosungung/nl2sql-releases/releases) asset (Apple Silicon; 태그별 선택 게시) |
 | **mcp** (Docker) | `ghcr.io/yoosungung/nl2sql-mcp:<태그>` (linux/amd64) |
 | **backend + 웹 UI** | `ghcr.io/yoosungung/nl2sql-backend:<태그>` (linux/amd64·linux/arm64) |
 | **메타데이터 정의** | 포함하지 않음 — 조직에서 별도 git 저장소로 관리 |
